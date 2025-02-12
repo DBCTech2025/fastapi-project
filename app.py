@@ -1,112 +1,131 @@
+from fastapi import FastAPI, Request, HTTPException
+import requests
 import os
 import time
+from supabase import create_client, Client
 import json
 import logging
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from supabase import create_client, Client
-from vapi_client import VAPIClient  # Assuming VAPI client is used for webhook handling
 
+app = FastAPI()
+
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Supabase credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase URL and Key must be set in environment variables")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-app = FastAPI()
-
-MAX_RETRIES = 3
-RETRY_BACKOFF = [60, 300, 900]  # Retry after 1 min, 5 min, 15 min
-
-def log_webhook_failure(project_id: str, endpoint_id: str, request_body: dict, error: str):
-    """Log failed webhook attempts in the webhook_logs table."""
-    try:
-        data = {
-            "project_id": project_id,
-            "endpoint_id": endpoint_id,
-            "status_code": None,
-            "request_body": json.dumps(request_body),
-            "response_body": None,
-            "error": error,
-            "created_at": time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-        supabase.table("webhook_logs").insert(data).execute()
-    except Exception as e:
-        logger.error(f"Failed to log webhook failure: {str(e)}")
-
-def retry_webhook(request_body: dict, retry_count: int = 0):
-    """Retry webhook requests with exponential backoff."""
-    if retry_count >= MAX_RETRIES:
-        logger.error("Max retries reached for webhook: %s", request_body)
-        return
-    
-    time.sleep(RETRY_BACKOFF[retry_count])  # Apply backoff delay
-    try:
-        response = VAPIClient.send_webhook(request_body)  # Assume a VAPI client is used
-        if response.status_code >= 500:
-            logger.warning("Retrying webhook due to server error: %s", response.status_code)
-            retry_webhook(request_body, retry_count + 1)
-    except Exception as e:
-        logger.error("Webhook retry failed: %s", str(e))
-        log_webhook_failure(request_body.get("project_id", "unknown"), request_body.get("endpoint_id", "unknown"), request_body, str(e))
-        retry_webhook(request_body, retry_count + 1)
-
-@app.post("/vapi/webhook/")
-async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
-    """Handle incoming webhooks from VAPI."""
-    try:
-        request_body = await request.json()
-        project_id = request_body.get("project_id")
-        endpoint_id = request_body.get("endpoint_id")
-
-        if not project_id or not endpoint_id:
-            raise HTTPException(status_code=400, detail="Missing project_id or endpoint_id")
-
-        response = VAPIClient.send_webhook(request_body)  # Sending to VAPI
-
-        if response.status_code >= 500:
-            logger.warning("Received server error, scheduling retry.")
-            background_tasks.add_task(retry_webhook, request_body, 1)
-            return {"status": "retrying"}
-
-        return {"status": "ok", "response": response.json()}
-    except Exception as e:
-        logger.exception("Error processing webhook request")
-        log_webhook_failure(request_body.get("project_id", "unknown"), request_body.get("endpoint_id", "unknown"), request_body, str(e))
-        return {"status": "failed", "error": str(e)}
-
 @app.post("/vapi/conversation/{client_id}/{project_id}/")
-async def start_conversation(client_id: str, project_id: str):
-    """Handle live conversations with vector database integration."""
+async def vapi_webhook(client_id: str, project_id: str, request: Request):
     try:
-        documents = supabase.table("documents").select("id").eq("client_id", client_id).eq("project_id", project_id).execute()
-        if not documents.data:
-            raise HTTPException(status_code=404, detail="No documents found")
-        
-        document_ids = [doc["id"] for doc in documents.data]
-        embeddings = supabase.table("document_embeddings").select("embedding").in_("document_id", document_ids).execute()
+        payload = await request.json()
+        logger.info(f"\ud83d\udce9 Webhook received for project {project_id} with payload: {payload}")
+    except json.JSONDecodeError:
+        logger.error("\u274c Invalid JSON payload received")
+        raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-        return {"status": "ok", "documents": document_ids, "embeddings": embeddings.data}
-    except Exception as e:
-        logger.exception("Error starting conversation")
-        return {"status": "failed", "error": str(e)}
+    # Ensure client_id and project_id exist in the correct tables
+    doc_query = supabase.table("documents")\
+        .select("id")\
+        .eq("client_id", client_id)\
+        .eq("project_id", project_id)\
+        .execute()
 
-@app.post("/vapi/call-log/{client_id}/{project_id}/")
-async def log_call(client_id: str, project_id: str, request: Request):
-    """Log call details in the database after a VAPI call."""
+    if not doc_query.data or len(doc_query.data) == 0:
+        logger.error(f"\u274c No document found for client_id {client_id} and project_id {project_id}")
+        raise HTTPException(status_code=404, detail="No document found for this project")
+
+    document_id = doc_query.data[0]["id"]
+
+    # Store webhook data in Supabase
     try:
-        call_data = await request.json()
-        log_entry = {
-            "client_id": client_id,
-            "project_id": project_id,
-            "call_data": json.dumps(call_data),
-            "created_at": time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-        supabase.table("webhook_logs").insert(log_entry).execute()
-        return {"status": "logged"}
+        supabase.table("document_embeddings").insert({
+            "document_id": document_id,
+            "metadata": json.dumps(payload),  # Ensure metadata is JSON serializable
+            "project_id": project_id
+        }).execute()
+        logger.info(f"\u2705 Webhook stored with document_id: {document_id}")
     except Exception as e:
-        logger.exception("Error logging call")
-        return {"status": "failed", "error": str(e)}
+        logger.error(f"\u274c Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    # Fetch endpoints
+    try:
+        endpoints_query = supabase.table("project_endpoints").select("id, url").eq("project_id", project_id).execute()
+        endpoints = endpoints_query.data
+        logger.info(f"\ud83d\udd0d Endpoints fetched for project {project_id}: {endpoints}")
+    except Exception as e:
+        logger.error(f"\u274c Error fetching endpoints: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching endpoints: {str(e)}")
+
+    if not endpoints:
+        logger.warning("\u26a0\ufe0f No endpoints found. Webhook stored but not forwarded.")
+        return {"message": "Webhook stored but no endpoints found"}
+
+    # Forward webhook to endpoints
+    errors = []
+    for endpoint in endpoints:
+        endpoint_id = endpoint.get("id")
+        endpoint_url = endpoint.get("url")
+        if not endpoint_url:
+            logger.warning(f"\u26a0\ufe0f Skipping invalid endpoint: {endpoint}")
+            continue
+
+        logger.info(f"\ud83d\ude80 Sending webhook to: {endpoint_url}")
+        start_time = time.time()
+        try:
+            response = requests.post(endpoint_url, json=payload, headers={"Content-Type": "application/json"})
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            response_body = None
+            error_message = None
+
+            try:
+                response_body = response.json() if response.content and response.headers.get("Content-Type") == "application/json" else response.text
+            except requests.exceptions.JSONDecodeError:
+                response_body = response.text  # Store raw text response instead of failing
+
+            if response.status_code >= 200 and response.status_code < 300:
+                logger.info(f"\u2705 Webhook sent to {endpoint_url} with status {response.status_code}, response: {response_body}")
+            else:
+                logger.warning(f"\u26a0\ufe0f Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response_body}")
+                error_message = f"Failed with status {response.status_code}"
+
+            supabase.table("webhook_logs").insert({
+                "project_id": project_id,
+                "endpoint_id": endpoint_id,
+                "status_code": response.status_code,
+                "request_body": json.dumps(payload),  # Ensure payload is JSON serializable
+                "response_body": response_body,
+                "error": error_message,
+                "duration_ms": duration_ms
+            }).execute()
+
+        except requests.exceptions.RequestException as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"\u274c Error sending to {endpoint_url}: {str(e)}")
+
+            supabase.table("webhook_logs").insert({
+                "project_id": project_id,
+                "endpoint_id": endpoint_id,
+                "status_code": None,
+                "request_body": json.dumps(payload),  # Ensure payload is JSON serializable
+                "response_body": None,
+                "error": str(e),
+                "duration_ms": duration_ms
+            }).execute()
+
+            errors.append(f"\u274c Error sending to {endpoint_url}: {str(e)}")
+
+    if errors:
+        logger.warning(f"\u26a0\ufe0f Webhook stored, but some endpoints failed: {errors}")
+        return {"message": "Webhook stored, but some endpoints failed", "errors": errors}
+
+    logger.info("\u2705 Webhook stored and forwarded successfully")
+    return {"message": "Webhook stored and forwarded successfully"}
