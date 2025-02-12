@@ -1,2 +1,4 @@
-supabase
+fastapi
 uvicorn
+supabase
+httpx
