@@ -1,60 +1,63 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
+import requests
 import os
-import json
-import uuid
 from supabase import create_client, Client
 
-# Load environment variables
+# Initialize FastAPI
+app = FastAPI()
+
+# Supabase credentials
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Validate environment variables
+# Ensure credentials exist
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set.")
+    raise ValueError("Supabase URL and Key must be set in environment variables")
 
-# Connect to Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-app = FastAPI()
 
 @app.post("/vapi/conversation/{client_id}/{project_id}/")
 async def vapi_webhook(client_id: str, project_id: str, request: Request):
+    payload = await request.json()
+    
+    # Ensure required fields are present
+    document_id = payload.get("document_id")
+    if not document_id:
+        return {"error": "Missing 'document_id' in payload"}
+    
+    # Store webhook data in Supabase
     try:
-        data = await request.json()  
-        print("Received data:", data)
-
-        # Validate document_id
-        document_id = data.get("document_id")
-        if not document_id:
-            print("Error: document_id is missing")
-            raise HTTPException(status_code=400, detail="document_id is required")
-
-        try:
-            uuid.UUID(document_id)  # Check if it's a valid UUID
-        except ValueError:
-            print("Error: Invalid UUID format")
-            raise HTTPException(status_code=400, detail="Invalid document_id format")
-
-        # Check if document exists
-        project_query = supabase.table("documents").select("project_id").eq("id", document_id).execute()
-        print("Query result:", project_query.data)
-
-        if not project_query.data:
-            print("Error: Document not found")
-            raise HTTPException(status_code=404, detail="Document not found")
-
-        # Insert data into document_embeddings (without client_id)
-        insert_data = {
+        supabase.table("document_embeddings").insert({
             "document_id": document_id,
-            "metadata": json.dumps(data),
-            "project_id": project_id  # Ensure project_id is included
-        }
-
-        insert_response = supabase.table("document_embeddings").insert(insert_data).execute()
-        print("Insert Response:", insert_response)
-
-        return {"message": f"Webhook received and stored for client {client_id} and project {project_id}"}
-
+            "metadata": payload,
+            "project_id": project_id
+        }).execute()
     except Exception as e:
-        print("Internal Server Error:", str(e))
-        return {"error": str(e)}
+        return {"error": f"Database error: {str(e)}"}
+
+    # Fetch alternate endpoints
+    try:
+        endpoints_query = supabase.table("project_endpoints").select("endpoint_url").eq("project_id", project_id).execute()
+        endpoints = endpoints_query.data
+    except Exception as e:
+        return {"error": f"Error fetching endpoints: {str(e)}"}
+    
+    if not endpoints:
+        return {"message": "Webhook stored but no alternate endpoints found"}
+
+    # Forward webhook to alternate endpoints
+    errors = []
+    for endpoint in endpoints:
+        endpoint_url = endpoint["endpoint_url"]
+        try:
+            response = requests.post(endpoint_url, json=payload, headers={"Content-Type": "application/json"})
+            print(f"Forwarded webhook to: {endpoint_url}, Status: {response.status_code}")
+            if response.status_code >= 400:
+                errors.append(f"Failed to send to {endpoint_url}: {response.status_code}")
+        except Exception as e:
+            errors.append(f"Error sending to {endpoint_url}: {str(e)}")
+    
+    if errors:
+        return {"message": "Webhook stored, but some endpoints failed", "errors": errors}
+    
+    return {"message": "Webhook stored and forwarded successfully"}
