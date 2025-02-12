@@ -1,43 +1,60 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 import os
+import json
+import uuid
 from supabase import create_client, Client
 
-# Load environment variables for Supabase
+# Load environment variables
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# Validate environment variables
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set.")
 
 # Connect to Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Initialize FastAPI app
 app = FastAPI()
 
 @app.post("/vapi/conversation/{client_id}/{project_id}/")
 async def vapi_webhook(client_id: str, project_id: str, request: Request):
-    data = await request.json()  # Get the incoming JSON data
+    try:
+        data = await request.json()  
+        print("Received data:", data)
 
-    # Retrieve project_id from documents table using document_id
-    document_id = data.get("document_id")
-    if not document_id:
-        return {"error": "Missing document_id in request"}
+        # Validate document_id
+        document_id = data.get("document_id")
+        if not document_id:
+            print("Error: document_id is missing")
+            raise HTTPException(status_code=400, detail="document_id is required")
 
-    project_query = supabase.table("documents").select("project_id").eq("id", document_id).execute()
-    project_data = project_query.data
+        try:
+            uuid.UUID(document_id)  # Check if it's a valid UUID
+        except ValueError:
+            print("Error: Invalid UUID format")
+            raise HTTPException(status_code=400, detail="Invalid document_id format")
 
-    if not project_data:
-        return {"error": f"No project found for document_id {document_id}"}
+        # Check if document exists
+        project_query = supabase.table("documents").select("project_id").eq("id", document_id).execute()
+        print("Query result:", project_query.data)
 
-    resolved_project_id = project_data[0]["project_id"]
+        if not project_query.data:
+            print("Error: Document not found")
+            raise HTTPException(status_code=404, detail="Document not found")
 
-    # Insert into document_embeddings with the correct project_id
-    response = supabase.table("document_embeddings").insert({
-        "document_id": document_id,
-        "project_id": resolved_project_id,  # Ensure we store project_id
-        "client_id": client_id,
-        "data": data
-    }).execute()
+        # Insert data into document_embeddings (without client_id)
+        insert_data = {
+            "document_id": document_id,
+            "metadata": json.dumps(data),
+            "project_id": project_id  # Ensure project_id is included
+        }
 
-    return {
-        "message": f"Webhook received and stored for client {client_id} and project {resolved_project_id}",
-        "document_id": document_id
-    }
+        insert_response = supabase.table("document_embeddings").insert(insert_data).execute()
+        print("Insert Response:", insert_response)
+
+        return {"message": f"Webhook received and stored for client {client_id} and project {project_id}"}
+
+    except Exception as e:
+        print("Internal Server Error:", str(e))
+        return {"error": str(e)}
