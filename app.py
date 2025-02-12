@@ -26,13 +26,18 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 async def vapi_webhook(client_id: str, project_id: str, request: Request):
     try:
         payload = await request.json()
-        logger.info(f"\U0001F4E9 Webhook received for project {project_id} with payload: {payload}")
+        logger.info(f"📩 Webhook received for project {project_id} with payload: {payload}")
     except json.JSONDecodeError:
         logger.error("❌ Invalid JSON payload received")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Validate document_id
-    document_id = payload.get("document_id")
+    # 🔹 FIXED: Now extracts `document_id` from multiple locations
+    document_id = (
+        payload.get("document_id") or
+        payload.get("metadata", {}).get("document_id") or
+        payload.get("message", {}).get("document_id")
+    )
+
     if not document_id:
         logger.error("❌ Missing 'document_id' in payload")
         raise HTTPException(status_code=400, detail="Missing 'document_id' in payload")
