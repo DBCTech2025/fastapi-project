@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request
-import logging
+from fastapi import FastAPI, Request, HTTPException
 import requests
 import os
 import time
 from supabase import create_client, Client
 import json
+import logging
 
 # Initialize FastAPI
 app = FastAPI()
@@ -22,64 +22,47 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    try:
-        body = await request.body()
-        if body:
-            json_body = json.loads(body)
-            logger.info(f"🔍 Incoming request: {json_body}")
-        else:
-            logger.warning("⚠️ Incoming request has an empty body")
-    except json.JSONDecodeError:
-        logger.error("❌ Invalid JSON payload received")
-        return HTTPException(status_code=400, detail="Invalid JSON payload")
-    
-    response = await call_next(request)
-    return response
-
-@app.post("/vapi/conversation/{conversation_id}/{project_id}/")
-async def handle_conversation(conversation_id: str, project_id: str, request: Request):
+@app.post("/vapi/conversation/{client_id}/{project_id}/")
+async def vapi_webhook(client_id: str, project_id: str, request: Request):
     try:
         payload = await request.json()
         logger.info(f"📩 Webhook received for project {project_id} with payload: {payload}")
     except json.JSONDecodeError:
-        logger.error("❌ Received invalid JSON payload")
+        logger.error("❌ Invalid JSON payload received")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # Ensure document_id is in the payload
+    # Validate document_id
     document_id = payload.get("document_id")
     if not document_id:
         logger.error("❌ Missing 'document_id' in payload")
-        logger.info(f"📄 Full payload for debugging: {payload}")
         raise HTTPException(status_code=400, detail="Missing 'document_id' in payload")
 
     # Store webhook data in Supabase
     try:
-        response = supabase.table("document_embeddings").insert({
+        supabase.table("document_embeddings").insert({
             "document_id": document_id,
             "metadata": payload,
             "project_id": project_id
         }).execute()
-        logger.info(f"✅ Stored webhook in 'document_embeddings': {response.data}")
+        logger.info("✅ Webhook stored in 'document_embeddings'")
     except Exception as e:
         logger.error(f"❌ Database error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    # Fetch alternate endpoints
+    # Fetch endpoints
     try:
         endpoints_query = supabase.table("project_endpoints").select("id, url").eq("project_id", project_id).execute()
         endpoints = endpoints_query.data
-        logger.info(f"🔍 Fetched endpoints for project {project_id}: {endpoints}")
+        logger.info(f"🔍 Endpoints fetched for project {project_id}: {endpoints}")
     except Exception as e:
         logger.error(f"❌ Error fetching endpoints: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error fetching endpoints: {str(e)}")
 
     if not endpoints:
-        logger.warning("⚠️ No alternate endpoints found.")
-        return {"message": "Webhook stored but no alternate endpoints found"}
+        logger.warning("⚠️ No endpoints found. Webhook stored but not forwarded.")
+        return {"message": "Webhook stored but no endpoints found"}
 
-    # Forward webhook to alternate endpoints
+    # Forward webhook to endpoints
     errors = []
     for endpoint in endpoints:
         endpoint_id = endpoint.get("id")
@@ -88,14 +71,15 @@ async def handle_conversation(conversation_id: str, project_id: str, request: Re
             logger.warning(f"⚠️ Skipping invalid endpoint: {endpoint}")
             continue
 
+        logger.info(f"🚀 Sending webhook to: {endpoint_url}")
         start_time = time.time()
         try:
             response = requests.post(endpoint_url, json=payload, headers={"Content-Type": "application/json"})
             duration_ms = int((time.time() - start_time) * 1000)
-            logger.info(f"🚀 Forwarded webhook to: {endpoint_url}, Status: {response.status_code}")
 
-            # Store log in Supabase
-            log_response = supabase.table("webhook_logs").insert({
+            logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response.text}")
+
+            supabase.table("webhook_logs").insert({
                 "project_id": project_id,
                 "endpoint_id": endpoint_id,
                 "status_code": response.status_code,
@@ -104,16 +88,14 @@ async def handle_conversation(conversation_id: str, project_id: str, request: Re
                 "error": None,
                 "duration_ms": duration_ms
             }).execute()
-            logger.info(f"✅ Webhook log stored: {log_response.data}")
 
             if response.status_code >= 400:
                 errors.append(f"❌ Failed to send to {endpoint_url}: {response.status_code}")
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             duration_ms = int((time.time() - start_time) * 1000)
             logger.error(f"❌ Error sending to {endpoint_url}: {str(e)}")
 
-            # Store failure log in Supabase
-            failure_log = supabase.table("webhook_logs").insert({
+            supabase.table("webhook_logs").insert({
                 "project_id": project_id,
                 "endpoint_id": endpoint_id,
                 "status_code": None,
@@ -122,7 +104,6 @@ async def handle_conversation(conversation_id: str, project_id: str, request: Re
                 "error": str(e),
                 "duration_ms": duration_ms
             }).execute()
-            logger.info(f"🚨 Failure log stored: {failure_log.data}")
             errors.append(f"❌ Error sending to {endpoint_url}: {str(e)}")
 
     if errors:
