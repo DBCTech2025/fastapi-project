@@ -26,7 +26,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 async def vapi_webhook(client_id: str, project_id: str, request: Request):
     try:
         payload = await request.json()
-        logger.info(f"📩 Webhook received for project {project_id} with payload: {payload}")
+        logger.info(f"\U0001F4E9 Webhook received for project {project_id} with payload: {payload}")
     except json.JSONDecodeError:
         logger.error("❌ Invalid JSON payload received")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
@@ -80,12 +80,15 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
             response_body = None
             error_message = None
 
+            try:
+                response_body = response.json() if response.content and response.headers.get("Content-Type") == "application/json" else response.text
+            except requests.exceptions.JSONDecodeError:
+                response_body = response.text  # Store raw text response instead of failing
+
             if response.status_code >= 200 and response.status_code < 300:
-                logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response.text}")
-                response_body = response.json() if response.content else None
+                logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response_body}")
             else:
-                logger.warning(f"⚠️ Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response.text}")
-                response_body = response.json() if response.content else None
+                logger.warning(f"⚠️ Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response_body}")
                 error_message = f"Failed with status {response.status_code}"
 
             supabase.table("webhook_logs").insert({
