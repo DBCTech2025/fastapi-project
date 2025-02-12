@@ -74,49 +74,30 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
         logger.info(f"🚀 Sending webhook to: {endpoint_url}")
         start_time = time.time()
         try:
-            start_time = time.time()
-try:
-    response = requests.post(endpoint_url, json=payload, headers={"Content-Type": "application/json"})
-    duration_ms = int((time.time() - start_time) * 1000)
+            response = requests.post(endpoint_url, json=payload, headers={"Content-Type": "application/json"})
+            duration_ms = int((time.time() - start_time) * 1000)
 
-    if response.status_code >= 200 and response.status_code < 300:
-        logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response.text}")
-        response_body = response.json() if response.content else None
-        error_message = None
-    else:
-        logger.warning(f"⚠️ Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response.text}")
-        response_body = response.json() if response.content else None
-        error_message = f"Failed with status {response.status_code}"
+            response_body = None
+            error_message = None
 
-    supabase.table("webhook_logs").insert({
-        "project_id": project_id,
-        "endpoint_id": endpoint_id,
-        "status_code": response.status_code,
-        "request_body": payload,
-        "response_body": response_body,
-        "error": error_message,
-        "duration_ms": duration_ms
-    }).execute()
+            if response.status_code >= 200 and response.status_code < 300:
+                logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response.text}")
+                response_body = response.json() if response.content else None
+            else:
+                logger.warning(f"⚠️ Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response.text}")
+                response_body = response.json() if response.content else None
+                error_message = f"Failed with status {response.status_code}"
 
-except requests.exceptions.RequestException as e:
-    duration_ms = int((time.time() - start_time) * 1000)
-    logger.error(f"❌ Error sending to {endpoint_url}: {str(e)}")
+            supabase.table("webhook_logs").insert({
+                "project_id": project_id,
+                "endpoint_id": endpoint_id,
+                "status_code": response.status_code,
+                "request_body": payload,
+                "response_body": response_body,
+                "error": error_message,
+                "duration_ms": duration_ms
+            }).execute()
 
-    supabase.table("webhook_logs").insert({
-        "project_id": project_id,
-        "endpoint_id": endpoint_id,
-        "status_code": None,
-        "request_body": payload,
-        "response_body": None,
-        "error": str(e),
-        "duration_ms": duration_ms
-    }).execute()
-
-    errors.append(f"❌ Error sending to {endpoint_url}: {str(e)}")
-
-
-            if response.status_code >= 400:
-                errors.append(f"❌ Failed to send to {endpoint_url}: {response.status_code}")
         except requests.exceptions.RequestException as e:
             duration_ms = int((time.time() - start_time) * 1000)
             logger.error(f"❌ Error sending to {endpoint_url}: {str(e)}")
@@ -130,6 +111,7 @@ except requests.exceptions.RequestException as e:
                 "error": str(e),
                 "duration_ms": duration_ms
             }).execute()
+
             errors.append(f"❌ Error sending to {endpoint_url}: {str(e)}")
 
     if errors:
