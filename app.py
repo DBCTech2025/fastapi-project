@@ -24,22 +24,26 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    """ Middleware to log incoming requests and detect JSON errors """
     try:
         body = await request.body()
+        logger.info(f"🔍 Raw request body: {body}")
+
         if body:
             json_body = json.loads(body)
-            logger.info(f"🔍 Incoming request: {json_body}")
+            logger.info(f"📩 Parsed JSON: {json_body}")
         else:
             logger.warning("⚠️ Incoming request has an empty body")
     except json.JSONDecodeError:
         logger.error("❌ Invalid JSON payload received")
         return HTTPException(status_code=400, detail="Invalid JSON payload")
-    
+
     response = await call_next(request)
     return response
 
 @app.post("/vapi/conversation/{conversation_id}/{project_id}/")
 async def handle_conversation(conversation_id: str, project_id: str, request: Request):
+    """ Handles webhook data, stores in Supabase, and forwards if needed """
     try:
         payload = await request.json()
         logger.info(f"📩 Webhook received for project {project_id} with payload: {payload}")
@@ -51,17 +55,20 @@ async def handle_conversation(conversation_id: str, project_id: str, request: Re
     document_id = payload.get("document_id")
     if not document_id:
         logger.error("❌ Missing 'document_id' in payload")
-        logger.info(f"📄 Full payload for debugging: {payload}")
+        logger.info(f"📄 Full payload for debugging: {json.dumps(payload, indent=2)}")
         raise HTTPException(status_code=400, detail="Missing 'document_id' in payload")
 
     # Store webhook data in Supabase
     try:
-        supabase.table("document_embeddings").insert({
+        response = supabase.table("document_embeddings").insert({
             "document_id": document_id,
             "metadata": payload,
             "project_id": project_id
         }).execute()
-        logger.info("✅ Stored webhook in 'document_embeddings'")
+
+        logger.info(f"✅ Supabase insert response: {response}")
+        if response.get("error"):
+            raise Exception(response["error"])
     except Exception as e:
         logger.error(f"❌ Database error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
@@ -119,13 +126,4 @@ async def handle_conversation(conversation_id: str, project_id: str, request: Re
                 "request_body": payload,
                 "response_body": None,
                 "error": str(e),
-                "duration_ms": duration_ms
-            }).execute()
-            errors.append(f"❌ Error sending to {endpoint_url}: {str(e)}")
-
-    if errors:
-        logger.warning(f"⚠️ Webhook stored, but some endpoints failed: {errors}")
-        return {"message": "Webhook stored, but some endpoints failed", "errors": errors}
-
-    logger.info("✅ Webhook stored and forwarded successfully")
-    return {"message": "Webhook stored and forwarded successfully"}
+           
