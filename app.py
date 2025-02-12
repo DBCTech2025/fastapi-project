@@ -6,7 +6,6 @@ from supabase import create_client, Client
 import json
 import logging
 
-# Initialize FastAPI
 app = FastAPI()
 
 # Configure logging
@@ -31,16 +30,18 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
         logger.error("❌ Invalid JSON payload received")
         raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
-    # 🔹 FIXED: Now extracts `document_id` from multiple locations
-    document_id = (
-        payload.get("document_id") or
-        payload.get("metadata", {}).get("document_id") or
-        payload.get("message", {}).get("document_id")
-    )
+    # 🔍 Fetch document_id from Supabase instead of assuming it's in the payload
+    doc_query = supabase.table("documents")\
+        .select("id")\
+        .eq("client_id", client_id)\
+        .eq("project_id", project_id)\
+        .execute()
 
-    if not document_id:
-        logger.error("❌ Missing 'document_id' in payload")
-        raise HTTPException(status_code=400, detail="Missing 'document_id' in payload")
+    if not doc_query.data or len(doc_query.data) == 0:
+        logger.error(f"❌ No document found for client_id {client_id} and project_id {project_id}")
+        raise HTTPException(status_code=404, detail="No document found for this project")
+
+    document_id = doc_query.data[0]["id"]
 
     # Store webhook data in Supabase
     try:
@@ -49,7 +50,7 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
             "metadata": payload,
             "project_id": project_id
         }).execute()
-        logger.info("✅ Webhook stored in 'document_embeddings'")
+        logger.info(f"✅ Webhook stored with document_id: {document_id}")
     except Exception as e:
         logger.error(f"❌ Database error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
