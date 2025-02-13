@@ -82,11 +82,12 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
             continue
 
         logger.info(f"🚀 Sending webhook to: {endpoint_url}")
-        
+
         # Only add topK=2 for endpoints with the specified vapi URL prefix.
         if endpoint_url.startswith("https://omsysapi.omaserver.com/index.php/calls/vapi/"):
             modified_payload = payload.copy()
-            if "topK" not in modified_payload:
+            # If topK is missing or falsy, set it to 2.
+            if not modified_payload.get("topK"):
                 modified_payload["topK"] = 2
                 logger.info(f"Added topK=2 to payload for endpoint {endpoint_url}")
         else:
@@ -101,11 +102,14 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
             error_message = None
 
             try:
-                response_body = response.json() if response.content and response.headers.get("Content-Type") == "application/json" else response.text
+                if response.content and "application/json" in response.headers.get("Content-Type", ""):
+                    response_body = response.json()
+                else:
+                    response_body = response.text
             except requests.exceptions.JSONDecodeError:
                 response_body = response.text  # Store raw text response instead of failing
 
-            if response.status_code >= 200 and response.status_code < 300:
+            if 200 <= response.status_code < 300:
                 logger.info(f"✅ Webhook sent to {endpoint_url} with status {response.status_code}, response: {response_body}")
             else:
                 logger.warning(f"⚠️ Webhook sent but failed with status {response.status_code} to {endpoint_url}, response: {response_body}")
@@ -115,7 +119,7 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
                 "project_id": project_id,
                 "endpoint_id": endpoint_id,
                 "status_code": response.status_code,
-                "request_body": json.dumps(payload),  # Ensure payload is JSON serializable
+                "request_body": json.dumps(payload),  # Original payload logged
                 "response_body": response_body,
                 "error": error_message,
                 "duration_ms": duration_ms
@@ -129,7 +133,7 @@ async def vapi_webhook(client_id: str, project_id: str, request: Request):
                 "project_id": project_id,
                 "endpoint_id": endpoint_id,
                 "status_code": None,
-                "request_body": json.dumps(payload),  # Ensure payload is JSON serializable
+                "request_body": json.dumps(payload),  # Original payload logged
                 "response_body": None,
                 "error": str(e),
                 "duration_ms": duration_ms
